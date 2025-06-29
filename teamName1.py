@@ -39,4 +39,4 @@ def getMyPosition(prcSoFar):
     positions = positions * notional_per_unit / prcSoFar[:, -1]
 
     # Step 8: Convert positions to integer for execution
-    return positions.astype(int)
+    return positions.astype(int), residuals, z # MODIFIED LINE
