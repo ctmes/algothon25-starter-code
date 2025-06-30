@@ -6,7 +6,7 @@ from volatility import estimate_market_volatility
 
 # Create plots directory
 if not os.path.exists('plots'):
- os.makedirs('plots')
+    os.makedirs('plots')
 
 # Load prices
 prices = np.loadtxt('prices.txt')  # Shape: (50 instruments, >=200 days)
@@ -20,7 +20,7 @@ std_returns = np.std(returns, axis=1)
 # Plot 1: Price series for first 5 instruments
 plt.figure()
 for i in range(min(5, nInst)):
- plt.plot(prices[i], label=f'Instrument {i}')
+    plt.plot(prices[i], label=f'Instrument {i}')
 plt.xlabel('Day')
 plt.ylabel('Price')
 plt.legend()
@@ -31,11 +31,11 @@ plt.close()
 window = 20
 rolling_vol = np.zeros((nInst, nDays - 1))
 for t in range(nDays - 1):
- start = max(0, t - window + 1)
- rolling_vol[:, t] = np.std(returns[:, start:t + 1], axis=1)
+    start = max(0, t - window + 1)
+    rolling_vol[:, t] = np.std(returns[:, start:t + 1], axis=1)
 plt.figure()
 for i in range(min(5, nInst)):
- plt.plot(rolling_vol[i], label=f'Instrument {i}')
+    plt.plot(rolling_vol[i], label=f'Instrument {i}')
 plt.xlabel('Day')
 plt.ylabel('Volatility')
 plt.legend()
@@ -72,31 +72,33 @@ plt.close()
 
 # Plot 6: Market volatility
 market_vol = [estimate_market_volatility(prices[:, :t + 1]) for t in range(1, nDays)]
+market_vol = np.array(market_vol, dtype=float)  # Ensure 1D NumPy array
 plt.figure()
 plt.plot(market_vol)
 plt.xlabel('Day')
 plt.ylabel('Market Volatility')
 plt.title('Market Volatility Over Time')
+plt.grid(True)
 plt.savefig('plots/market_volatility.png')
 plt.close()
 
 # Save analysis results
 results = {
- 'n_instruments': nInst,
- 'n_days': nDays,
- 'statistics': {
-     'mean_returns': mean_returns.tolist(),
-     'std_returns': std_returns.tolist(),
-     'mean_market_vol': float(np.mean(market_vol))
- },
- 'plot_paths': [
-     'plots/price_series.png',
-     'plots/rolling_volatility.png',
-     'plots/correlation_heatmap.png',
-     'plots/returns_histogram.png',
-     'plots/zscore_histogram.png',
-     'plots/market_volatility.png'
- ]
+    'n_instruments': nInst,
+    'n_days': nDays,
+    'statistics': {
+        'mean_returns': mean_returns.tolist(),
+        'std_returns': std_returns.tolist(),
+        'mean_market_vol': float(np.mean(market_vol))
+    },
+    'plot_paths': [
+        'plots/price_series.png',
+        'plots/rolling_volatility.png',
+        'plots/correlation_heatmap.png',
+        'plots/returns_histogram.png',
+        'plots/zscore_histogram.png',
+        'plots/market_volatility.png'
+    ]
 }
 with open('analysis_results.json', 'w') as f:
- json.dump(results, f, indent=4)
+    json.dump(results, f, indent=4)
