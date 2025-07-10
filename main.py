@@ -1,139 +1,92 @@
 import numpy as np
-from statsmodels.tsa.stattools import coint
 
-# --- STRATEGY PARAMETERS ---
-Z_SCORE_THRESHOLD = 1.25
-REBALANCE_PERIOD = 3
-MEAN_RETURN_LOOKBACK = 20
-CORR_THRESHOLD = 0.7
-COINT_P_VALUE = 0.05
-RISK_TARGET = 5000
-
-# --- GLOBAL STATE ---
-last_rebalance = -REBALANCE_PERIOD
-previous_positions = np.zeros(50)
+nInst = 50
+currentPos = np.zeros(nInst)
 
 
-def compute_z_scores(prices, lookback):
-    """Volatility-normalized z-scores with debug prints."""
-    print(f"\n[Z-SCORES] Computing with {lookback}-day lookback...")
-    returns = np.diff(np.log(prices), axis=1)
-
-    if returns.shape[1] < lookback:
-        print(f"[WARNING] Insufficient data ({returns.shape[1]} days < {lookback} lookback)")
-        return np.zeros(prices.shape[0])
-
-    mean = np.mean(returns[:, -lookback:], axis=1)
-    vol = np.std(returns[:, -lookback:], axis=1) + 1e-6
-    z_scores = mean / vol
-
-    extreme_count = np.sum(np.abs(z_scores) > Z_SCORE_THRESHOLD)
-    print(f"[Z-SCORES] Found {extreme_count} instruments with |z| > {Z_SCORE_THRESHOLD}")
-    print(
-        f"[Z-SCORES] Top/Bottom 3: {np.argsort(z_scores)[:3]} (short candidates), {np.argsort(z_scores)[-3:]} (long candidates)")
-
-    return z_scores
+def compute_rsi(prices, period=14):
+    """
+    Compute RSI for each instrument over the last period days.
+    Returns: RSI values for the last timestep.
+    """
+    delta = np.diff(prices, axis=1)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = np.zeros(prices.shape[0])
+    avg_loss = np.zeros(prices.shape[0])
+    for i in range(period, delta.shape[1]):
+        avg_gain = (avg_gain * (period - 1) + gain[:, i]) / period
+        avg_loss = (avg_loss * (period - 1) + loss[:, i]) / period
+    rsi = np.where(avg_loss != 0, 100 - (100 * avg_gain / (avg_gain + avg_loss)), 100)
+    return rsi
 
 
-def find_pairs_fast(prices):
-    """Pair finding with progress tracking."""
-    print("\n[PAIRS] Starting pair search...")
-    n = prices.shape[0]
-    pairs = []
-    tested_pairs = 0
+def getMyPosition(prcSoFar):
+    global currentPos
+    (nins, nt) = prcSoFar.shape
 
-    print(f"[PAIRS] Computing correlation matrix (threshold={CORR_THRESHOLD})...")
-    corr = np.corrcoef(prices)
+    # Validate input shape and transpose if necessary
+    if nins != nInst:
+        if nt == nInst:
+            prcSoFar = prcSoFar.T
+            nins, nt = prcSoFar.shape
+        else:
+            raise ValueError(f"Expected {nInst} instruments, got {nins}")
 
-    for i in range(n):
-        for j in range(i + 1, n):
-            if abs(corr[i, j]) < CORR_THRESHOLD:
-                continue
+    if nt < 20:  # Need at least 20 days for volatility and RSI
+        return np.zeros(nins)
 
-            tested_pairs += 1
-            _, p_val, _ = coint(prices[i], prices[j])
+    # Calculate momentum: 5-day log returns
+    lookback = 5
+    returns = np.log(prcSoFar[:, -1] / prcSoFar[:, -lookback - 1])
 
-            if p_val < COINT_P_VALUE:
-                pairs.append((i, j))
-                print(f"[PAIRS] Found pair ({i},{j}) p={p_val:.4f} corr={corr[i, j]:.2f}")
+    # Calculate volatility: standard deviation of daily log returns over 20 days
+    daily_returns = np.log(prcSoFar[:, 1:] / prcSoFar[:, :-1])
+    volatility = np.std(daily_returns[:, -20:], axis=1)
+    volatility = np.where(volatility == 0, 1e-6, volatility)
 
-    print(f"[PAIRS] Tested {tested_pairs} correlated pairs | Found {len(pairs)} cointegrated pairs")
-    return pairs
+    # Trend filtering: t-statistic for momentum
+    mean_returns = np.mean(daily_returns[:, -lookback:], axis=1)
+    t_stat = mean_returns / (volatility / np.sqrt(lookback))
+    trend_threshold = 1.0
+    momentum_signal = np.where(np.abs(t_stat) > trend_threshold, returns / volatility, 0)
 
+    # Mean-reversion: RSI-based signal for non-trending instruments
+    rsi = compute_rsi(prcSoFar) if nt > 14 else np.full(nins, 50.0)
+    reversion_signal = np.zeros(nins)
+    reversion_mask = (np.abs(t_stat) <= trend_threshold) & ((rsi < 35) | (rsi > 65))
+    reversion_signal[reversion_mask] = -np.sign(rsi[reversion_mask] - 50) / volatility[reversion_mask]
 
-def log_position_changes(old_pos, new_pos, prices):
-    """Detailed position change logging."""
-    changed = np.where(new_pos != old_pos)[0]
-    if len(changed) == 0:
-        print("\n[POSITIONS] No changes from previous day")
-        return
+    # Combine signals
+    signal = momentum_signal
+    signal[reversion_mask] = reversion_signal[reversion_mask]
 
-    print("\n[POSITIONS] Changes:")
-    total_dvol = 0
-    for i in changed:
-        delta = new_pos[i] - old_pos[i]
-        action = "BUY" if delta > 0 else "SELL"
-        dvol = abs(delta) * prices[i, -1]
-        total_dvol += dvol
+    # Log trading activity (for debugging)
+    trending_count = np.sum(np.abs(t_stat) > trend_threshold)
+    reversion_count = np.sum(reversion_mask)
+    if nt % 100 == 0:  # Log periodically
+        print(f"Day {nt}: Trending instruments: {trending_count}/50, Mean-reverting: {reversion_count}/50")
 
-        print(f"  Inst {i:2d}: {action:4s} {abs(delta):4d} shares "
-              f"(Now: {new_pos[i]:5d}, Price: ${prices[i, -1]:6.2f}) "
-              f"| ${dvol:7,.0f}")
+    # Normalize signals
+    signal_norm = np.sqrt(np.sum(signal ** 2))
+    if signal_norm > 0:
+        signal = signal / signal_norm
 
-    print(f"[POSITIONS] Total $ Volume: ${total_dvol:,.0f}")
+    # Calculate target positions
+    current_prices = prcSoFar[:, -1]
+    target_dollar_pos = 7500 * signal  # Increased for moderate volatility
+    target_shares = np.array([int(x / p) if p != 0 else 0 for x, p in zip(target_dollar_pos, current_prices)])
 
+    # Enforce position limits
+    pos_limits = np.array([int(10000 / p) if p != 0 else 0 for p in current_prices])
+    target_shares = np.clip(target_shares, -pos_limits, pos_limits)
 
-def getMyPosition(prices):
-    global last_rebalance, previous_positions
+    # Commission management
+    delta_pos = target_shares - currentPos
+    trade_threshold = 0.015 * pos_limits
+    delta_pos = np.where(np.abs(delta_pos) > trade_threshold, delta_pos, 0)
 
-    nInst, nDays = prices.shape
-    print(f"\n{'=' * 40}")
-    print(f"DAY {nDays} | Last rebalance: {last_rebalance} (Period: {REBALANCE_PERIOD} days)")
+    # Update positions
+    currentPos = np.array([int(x) for x in currentPos + delta_pos])
 
-    # --- Rebalance Check ---
-    if nDays - last_rebalance < REBALANCE_PERIOD:
-        print("[SKIP] Not a rebalance day")
-        return previous_positions
-
-    if nDays < 30:
-        print("[SKIP] Insufficient data (<30 days)")
-        return previous_positions
-
-    # --- Market Regime ---
-    market_vol = np.std(np.diff(np.log(prices[-1, -20:])))
-    print(f"[VOLATILITY] 20-day market vol: {market_vol:.4f}")
-    if market_vol > 0.02:
-        print("[SKIP] High volatility regime")
-        return previous_positions
-
-    # --- Signal Generation ---
-    z_scores = compute_z_scores(prices, MEAN_RETURN_LOOKBACK)
-    pairs = find_pairs_fast(prices.T)
-
-    # --- Position Calculation ---
-    new_positions = np.zeros(nInst)
-
-    # Mean Reversion Core
-    for i in range(nInst):
-        z = z_scores[i]
-        if abs(z) > Z_SCORE_THRESHOLD:
-            size = int((RISK_TARGET / (market_vol + 1e-6)) * np.tanh(z / Z_SCORE_THRESHOLD) / prices[i, -1])
-            new_positions[i] = size if z < 0 else -size
-
-    # Pairs Overlay
-    for i, j in pairs:
-        spread = prices[i] - prices[j]
-        z_spread = (spread[-1] - np.mean(spread)) / (np.std(spread) + 1e-6)
-
-        if abs(z_spread) > Z_SCORE_THRESHOLD:
-            size = int((RISK_TARGET / (market_vol + 1e-6)) / prices[i, -1])
-            new_positions[i] -= np.sign(z_spread) * size
-            new_positions[j] += np.sign(z_spread) * size
-            print(f"[PAIRS TRADE] {i}-{j} | z={z_spread:.2f} | Size: {size}")
-
-    # --- Finalize ---
-    last_rebalance = nDays
-    log_position_changes(previous_positions, new_positions, prices)
-    previous_positions = new_positions
-
-    return new_positions.astype(int)
+    return currentPos
