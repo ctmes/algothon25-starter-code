@@ -1,31 +1,28 @@
 import numpy as np
 
+# Global parameters
+MOMENTUM_LOOKBACK = 10
+VOL_LOOKBACK = 10
+MA_SHORT = 5
+MA_LONG = 20
+RSI_LOOKBACK = 14
+MOMENTUM_THRESHOLD = 0.06
+VOL_THRESHOLD = 0.015
+RSI_LONG = 60
+RSI_SHORT = 40
+TRAILING_STOP = 0.05
+MAX_POSITION_VALUE = 10000
 
 def getMyPosition(prcSoFar):
     nInst, nt = prcSoFar.shape
     positions = np.zeros(nInst, dtype=int)
 
-    # Parameters
-    momentum_lookback = 10  # Lookback period for momentum
-    vol_lookback = 10  # Lookback period for volatility
-    ma_short = 5  # Short-term moving average
-    ma_long = 20  # Long-term moving average
-    rsi_lookback = 14  # RSI lookback period
-    momentum_threshold = 0.06  # 6% price change threshold
-    vol_threshold = 0.015  # 1.5% volatility threshold
-    rsi_long = 60  # RSI threshold for long
-    rsi_short = 40  # RSI threshold for short
-    trailing_stop = 0.05  # 5% trailing stop
-    max_position_value = 10000  # Position limit per instrument
-
     # Persistent state to track positions and trailing stops
     if not hasattr(getMyPosition, 'state'):
         getMyPosition.state = {}  # {inst: [position, entry_day, peak_price, trough_price]}
 
-    # Current day
     current_day = nt - 1
 
-    # Calculate RSI
     def calculate_rsi(prices, period):
         if len(prices) < period + 1:
             return 50.0
@@ -37,50 +34,49 @@ def getMyPosition(prcSoFar):
         rs = avg_gain / avg_loss if avg_loss != 0 else np.inf
         return 100 - (100 / (1 + rs))
 
-    # Process each instrument
     for inst in range(nInst):
         prices = prcSoFar[inst, :]
 
         # Skip if insufficient data
-        if nt < max(momentum_lookback, vol_lookback, ma_long, rsi_lookback) + 1:
+        if nt < max(MOMENTUM_LOOKBACK, VOL_LOOKBACK, MA_LONG, RSI_LOOKBACK) + 1:
             continue
 
         # Calculate momentum
-        if prices[-momentum_lookback - 1] != 0:
-            momentum = (prices[-1] - prices[-momentum_lookback - 1]) / prices[-momentum_lookback - 1]
+        if prices[-MOMENTUM_LOOKBACK - 1] != 0:
+            momentum = (prices[-1] - prices[-MOMENTUM_LOOKBACK - 1]) / prices[-MOMENTUM_LOOKBACK - 1]
         else:
             momentum = 0
 
         # Calculate volatility
-        if np.all(prices[-vol_lookback - 1:-1] != 0):
-            returns = np.diff(prices[-vol_lookback - 1:]) / prices[-vol_lookback - 1:-1]
+        if np.all(prices[-VOL_LOOKBACK - 1:-1] != 0):
+            returns = np.diff(prices[-VOL_LOOKBACK - 1:]) / prices[-VOL_LOOKBACK - 1:-1]
             volatility = np.std(returns) if len(returns) > 0 else np.inf
         else:
             volatility = np.inf
 
         # Calculate moving averages
-        if nt >= ma_long + 1:
-            ma_short_val = np.mean(prices[-ma_short:])
-            ma_long_val = np.mean(prices[-ma_long:])
+        if nt >= MA_LONG + 1:
+            ma_short_val = np.mean(prices[-MA_SHORT:])
+            ma_long_val = np.mean(prices[-MA_LONG:])
             ma_crossover = ma_short_val > ma_long_val
             ma_bearish = ma_short_val < ma_long_val
         else:
             ma_crossover = ma_bearish = False
 
         # Calculate RSI
-        rsi = calculate_rsi(prices, rsi_lookback)
+        rsi = calculate_rsi(prices, RSI_LOOKBACK)
 
         # Update trailing stop for existing positions
         if inst in getMyPosition.state:
             pos, entry_day, peak_price, trough_price = getMyPosition.state[inst]
             if pos > 0:  # Long position
                 peak_price = max(peak_price, prices[-1])
-                if prices[-1] <= peak_price * (1 - trailing_stop):
+                if prices[-1] <= peak_price * (1 - TRAILING_STOP):
                     del getMyPosition.state[inst]
                     continue
             elif pos < 0:  # Short position
                 trough_price = min(trough_price, prices[-1])
-                if prices[-1] >= trough_price * (1 + trailing_stop):
+                if prices[-1] >= trough_price * (1 + TRAILING_STOP):
                     del getMyPosition.state[inst]
                     continue
             positions[inst] = pos
@@ -88,17 +84,17 @@ def getMyPosition(prcSoFar):
             continue
 
         # Trading logic
-        if volatility < vol_threshold:
-            if (momentum > momentum_threshold and ma_crossover and rsi > rsi_long):
+        if volatility < VOL_THRESHOLD:
+            if (momentum > MOMENTUM_THRESHOLD and ma_crossover and rsi > RSI_LONG):
                 # Long position
-                shares = int(max_position_value / prices[-1])
-                if shares * prices[-1] <= max_position_value:
+                shares = int(MAX_POSITION_VALUE / prices[-1])
+                if shares * prices[-1] <= MAX_POSITION_VALUE:
                     positions[inst] = shares
                     getMyPosition.state[inst] = [shares, current_day, prices[-1], prices[-1]]
-            elif (momentum < -momentum_threshold and ma_bearish and rsi < rsi_short):
+            elif (momentum < -MOMENTUM_THRESHOLD and ma_bearish and rsi < RSI_SHORT):
                 # Short position
-                shares = -int(max_position_value / prices[-1])
-                if abs(shares * prices[-1]) <= max_position_value:
+                shares = -int(MAX_POSITION_VALUE / prices[-1])
+                if abs(shares * prices[-1]) <= MAX_POSITION_VALUE:
                     positions[inst] = shares
                     getMyPosition.state[inst] = [shares, current_day, prices[-1], prices[-1]]
 
