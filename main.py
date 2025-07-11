@@ -6,12 +6,14 @@ VOL_LOOKBACK = 10
 MA_SHORT = 5
 MA_LONG = 20
 RSI_LOOKBACK = 14
-MOMENTUM_THRESHOLD = 0.06
-VOL_THRESHOLD = 0.015
+MOMENTUM_THRESHOLD = 0.03
+VOL_THRESHOLD = 0.013
 RSI_LONG = 60
 RSI_SHORT = 40
 TRAILING_STOP = 0.05
 MAX_POSITION_VALUE = 10000
+MAX_MOMENTUM_FACTOR = 1.5  # Cap for dynamic position sizing
+MIN_MOMENTUM_FACTOR = 0.5  # Minimum for dynamic position sizing
 
 def getMyPosition(prcSoFar):
     nInst, nt = prcSoFar.shape
@@ -83,18 +85,23 @@ def getMyPosition(prcSoFar):
             getMyPosition.state[inst] = [pos, entry_day, peak_price, trough_price]
             continue
 
+        # Calculate dynamic position sizing based on momentum
+        momentum_factor = min(MAX_MOMENTUM_FACTOR, max(MIN_MOMENTUM_FACTOR, abs(momentum) / MOMENTUM_THRESHOLD))
+
         # Trading logic
         if volatility < VOL_THRESHOLD:
             if (momentum > MOMENTUM_THRESHOLD and ma_crossover and rsi > RSI_LONG):
-                # Long position
-                shares = int(MAX_POSITION_VALUE / prices[-1])
-                if shares * prices[-1] <= MAX_POSITION_VALUE:
+                # Long position with dynamic sizing
+                adjusted_position_value = MAX_POSITION_VALUE * momentum_factor
+                shares = int(adjusted_position_value / prices[-1])
+                if shares * prices[-1] <= adjusted_position_value:
                     positions[inst] = shares
                     getMyPosition.state[inst] = [shares, current_day, prices[-1], prices[-1]]
             elif (momentum < -MOMENTUM_THRESHOLD and ma_bearish and rsi < RSI_SHORT):
-                # Short position
-                shares = -int(MAX_POSITION_VALUE / prices[-1])
-                if abs(shares * prices[-1]) <= MAX_POSITION_VALUE:
+                # Short position with dynamic sizing
+                adjusted_position_value = MAX_POSITION_VALUE * momentum_factor
+                shares = -int(adjusted_position_value / prices[-1])
+                if abs(shares * prices[-1]) <= adjusted_position_value:
                     positions[inst] = shares
                     getMyPosition.state[inst] = [shares, current_day, prices[-1], prices[-1]]
 

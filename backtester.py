@@ -24,6 +24,7 @@ PLOT_COLORS: Dict[str, str] = {
     "cum_pnl": "#1f77b4",
     "utilisation": "#ff7f0e",
     "sharpe_change": "#d62728",
+    "drawdown": "#9467bd",
 }
 
 default_strategy_filepath: str = "./main.py"
@@ -59,6 +60,7 @@ usage_error: str = """
             sharpe-heat-map: graphs a heat map of the daily sharpe ratios your strategy had over 
                 time
             cum-sharpe: graphs your cumulative sharpe ratio over time
+            drawdown: graphs the drawdown over time
 """
 
 CMD_LINE_OPTIONS: List[str] = [
@@ -75,6 +77,7 @@ GRAPH_OPTIONS: List[str] = [
     "capital-util",
     "sharpe-heat-map",
     "cum-sharpe",
+    "drawdown",
 ]
 
 # TYPE DECLARATIONS ###############################################################################
@@ -87,6 +90,7 @@ class Trade(TypedDict):
     price_entry: float
     order_type: str
     day: int
+    duration: int
 
 class BacktesterResults(TypedDict):
     daily_pnl: ndarray
@@ -95,6 +99,10 @@ class BacktesterResults(TypedDict):
     trades: Dict[int, List[Trade]]
     start_day: int
     end_day: int
+    total_volume: float
+    instrument_pnl: Dict[int, List[float]]
+    drawdowns: ndarray
+    instrument_atr: ndarray
 
 class Params:
     def __init__(
@@ -105,7 +113,7 @@ class Params:
             start_day: int = 1,
             end_day: int = 1000,
             enable_commission: bool = True,
-            graphs: List[str] = ["cum-pnl", "sharpe-heat-map", "daily-pnl"],
+            graphs: List[str] = ["cum-pnl", "drawdown", "daily-pnl"],
             prices_filepath: str = "./prices.txt",
             instruments_to_test: List[int] = range(1, 51)
     ) -> None:
@@ -202,6 +210,12 @@ def load_get_positions_function(
         raise TypeError(strategy_function_not_callable_message)
     return function
 
+def calculate_atr(prices: ndarray, period: int = 14) -> float:
+    if len(prices) < period + 1:
+        return 0.0
+    high_low = np.abs(prices[1:] - prices[:-1])
+    return np.mean(high_low[-period:]) if len(high_low) >= period else 0.0
+
 def generate_stats_subplot(
         results: BacktesterResults, subplot: Axes, enable_commission: bool
 ) -> Axes:
@@ -209,16 +223,18 @@ def generate_stats_subplot(
     win_rate_pct: float = (
             np.sum(results["daily_pnl"] > 0) / len(results["daily_pnl"]) * 100
     )
+    max_drawdown: float = np.min(results["drawdowns"]) if len(results["drawdowns"]) > 0 else 0.0
     stats_text: str = (
-            f"Ran from day {results['start_day']} to {results['end_day']}\n"
-            r"$\bf{Commission \ Turned \ On:}$" + f"{enable_commission}\n\n"
-            r"$\bf{Backtester \ Stats}$" + "\n\n"
-            f"Mean PnL: ${results['daily_pnl'].mean():.2f}\n"
-            f"Std Dev: ${results['daily_pnl'].std():.2f}\n"
-            f"Annualised Sharpe Ratio: "
-            f"{np.sqrt(250) * results['daily_pnl'].mean() / results['daily_pnl'].std():.2f}\n"
-            f"Win Rate %: {win_rate_pct:.2f}% \n"
-            f"Score: {results['daily_pnl'].mean() - 0.1 * results['daily_pnl'].std():.2f}"
+        f"Ran from day {results['start_day']} to {results['end_day']}\n"
+        r"$\bf{Commission \ Turned \ On:}$" + f"{enable_commission}\n\n"
+        r"$\bf{Backtester \ Stats}$" + "\n\n"
+        f"Mean PnL: ${results['daily_pnl'].mean():.2f}\n"
+        f"Std Dev: ${results['daily_pnl'].std():.2f}\n"
+        f"Max Drawdown: ${max_drawdown:.2f}\n"
+        f"Annualised Sharpe Ratio: "
+        f"{np.sqrt(250) * results['daily_pnl'].mean() / results['daily_pnl'].std():.2f}\n"
+        f"Win Rate %: {win_rate_pct:.2f}% \n"
+        f"Score: {results['daily_pnl'].mean() - 0.1 * results['daily_pnl'].std():.2f}"
     )
     subplot.text(
         0.05, 0.95, stats_text, fontsize=14, va="top", ha="left", linespacing=1.5
@@ -274,7 +290,12 @@ def generate_sharpe_heat_map(results: BacktesterResults, subplot: Axes) -> Axes:
     returns: ndarray = results["daily_instrument_returns"]
     means: ndarray = np.mean(returns, axis=1)
     stds: ndarray = np.std(returns, axis=1)
-    sharpe_ratios: ndarray = (means / stds) * np.sqrt(250)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        sharpe_ratios = np.where(
+            (stds != 0) & (np.isfinite(stds)) & (np.isfinite(means)),
+            (means / stds) * np.sqrt(250),
+            0
+        )
     sharpe_grid = sharpe_ratios.reshape(1, -1)
     im = subplot.imshow(sharpe_grid, cmap="viridis", aspect="auto")
     subplot.set_title("Annualised Sharpe-Ratio Heat Map (Higher = Better)", fontsize=12)
@@ -294,7 +315,11 @@ def generate_sharpe_ratio_subplot(results: BacktesterResults, subplot: Axes) -> 
     cumulative_std_dev: ndarray = np.array(
         [np.std(daily_pnl[: i + 1], ddof=0) for i in range(len(daily_pnl))]
     )
-    sharpe_ratios: ndarray = (cumulative_means / cumulative_std_dev) * np.sqrt(250)
+    sharpe_ratios: ndarray = np.where(
+        (cumulative_std_dev != 0) & (np.isfinite(cumulative_std_dev)),
+        (cumulative_means / cumulative_std_dev) * np.sqrt(250),
+        0
+    )
     subplot.set_title(
         f"Change in Annualised Sharpe Ratio from day {results['start_day']} to {results['end_day']}",
         fontsize=12, fontweight="bold"
@@ -305,6 +330,20 @@ def generate_sharpe_ratio_subplot(results: BacktesterResults, subplot: Axes) -> 
     subplot.spines["top"].set_visible(False)
     subplot.spines["right"].set_visible(False)
     subplot.plot(days, sharpe_ratios, linestyle="-", color=PLOT_COLORS["sharpe_change"])
+    return subplot
+
+def generate_drawdown_subplot(results: BacktesterResults, subplot: Axes) -> Axes:
+    days: ndarray = np.arange(results["start_day"], results["end_day"] + 1)
+    subplot.set_title(
+        f"Drawdown from day {results['start_day']} to {results['end_day']}",
+        fontsize=12, fontweight="bold"
+    )
+    subplot.set_xlabel("Days", fontsize=10)
+    subplot.set_ylabel("Drawdown ($)", fontsize=10)
+    subplot.grid(True, linestyle="--", linewidth=0.5, alpha=0.7)
+    subplot.spines["top"].set_visible(False)
+    subplot.spines["right"].set_visible(False)
+    subplot.plot(days, results["drawdowns"], linestyle="-", color=PLOT_COLORS["drawdown"])
     return subplot
 
 def get_subplot(graph_type: str, results: BacktesterResults, subplot: Axes) -> Axes:
@@ -318,6 +357,8 @@ def get_subplot(graph_type: str, results: BacktesterResults, subplot: Axes) -> A
         return generate_sharpe_heat_map(results, subplot)
     elif graph_type == "cum-sharpe":
         return generate_sharpe_ratio_subplot(results, subplot)
+    elif graph_type == "drawdown":
+        return generate_drawdown_subplot(results, subplot)
 
 def get_ema(instrument_price_history: ndarray, lookback: int) -> ndarray:
     price_series: Series = pd.Series(instrument_price_history)
@@ -353,12 +394,17 @@ class Backtester:
         daily_pnl_list: List[float] = []
         daily_capital_utilisation_list: List[float] = []
         instrument_returns: Dict[int, list[float]] = {instrument: [0] for instrument in range(0, 50)}
+        instrument_pnl: Dict[int, list[float]] = {instrument: [0] for instrument in range(0, 50)}
         trades: Dict[int, List[Trade]] = {instrument: [] for instrument in range(0, 50)}
         requested_positions_history: List[List[int]] = []
+        drawdowns: List[float] = []
+        instrument_atr: List[float] = []
+        total_volume: float = 0
+        cumulative_pnl: float = 0
+        peak_pnl: float = 0
+
         for instrument_no in range(0, 50):
             requested_positions_history.append([0])
-
-        total_volume: float = 0  # Track total volume for summary
 
         for day in range(start_day, end_day + 1):
             prices_so_far: ndarray = self.price_history[:, : day]
@@ -386,9 +432,14 @@ class Backtester:
             current_positions = np.array(adjusted_positions)
             for instrument in range(0, 50):
                 position_history[instrument].append(current_positions[instrument])
+                # Append position every day to ensure list length matches days
+                requested_positions_history[instrument].append(new_positions[instrument])
             positions_value: float = current_positions.dot(current_prices)
             profit_and_loss: float = cash + positions_value - portfolio_value
             daily_pnl_list.append(profit_and_loss)
+            cumulative_pnl += profit_and_loss
+            peak_pnl = max(peak_pnl, cumulative_pnl)
+            drawdowns.append(peak_pnl - cumulative_pnl)
             if day > start_day + 1:
                 for instrument in range(0, 50):
                     delta_price: float = (
@@ -397,33 +448,60 @@ class Backtester:
                     position: int = position_history[instrument][-2]
                     instrument_return: float = delta_price * position
                     instrument_returns[instrument].append(instrument_return)
+                    instrument_pnl[instrument].append(instrument_return - commission * abs(delta_positions[instrument]))
             for instrument_no in range(0, 50):
-                if new_positions[instrument_no] != requested_positions_history[instrument_no][-1]:
+                if new_positions[instrument_no] != requested_positions_history[instrument_no][-2]:
                     delta: int = new_positions[instrument_no] - requested_positions_history[
-                        instrument_no][-1]
+                        instrument_no][-2]
                     new_trade: Trade = {
                         "price_entry": current_prices[instrument_no],
                         "order_type": "buy" if delta > 0 else "sell",
-                        "day": day
+                        "day": day,
+                        "duration": 0
                     }
                     trades[instrument_no].append(new_trade)
-                    requested_positions_history[instrument_no].append(new_positions[instrument_no])
             portfolio_value = cash + positions_value
+
+        # Calculate trade durations
+        for instrument_no in range(0, 50):
+            active_trade = None
+            for trade in trades[instrument_no]:
+                if active_trade is None:
+                    active_trade = trade
+                    continue
+                # Check if position was closed (position == 0) after entry
+                day_idx = trade["day"] - start_day
+                if day_idx < len(requested_positions_history[instrument_no]):
+                    if requested_positions_history[instrument_no][day_idx] == 0:
+                        active_trade["duration"] = trade["day"] - active_trade["day"]
+                        active_trade = None
+            # Close any open trades at end_day
+            if active_trade is not None:
+                active_trade["duration"] = end_day - active_trade["day"]
+
+        # Calculate ATR for each instrument
+        for instrument in range(0, 50):
+            atr = calculate_atr(prices_so_far[instrument], period=14)
+            instrument_atr.append(atr)
 
         backtester_results: BacktesterResults = {
             "daily_pnl": np.array(daily_pnl_list),
             "daily_capital_utilisation": np.array(daily_capital_utilisation_list),
             "daily_instrument_returns": np.array([instrument_returns[i] for i in range(0, 50)]),
+            "instrument_pnl": instrument_pnl,
             "trades": trades,
             "start_day": start_day,
             "end_day": end_day,
-            "total_volume": total_volume  # Added for summary
+            "total_volume": total_volume,
+            "drawdowns": np.array(drawdowns),
+            "instrument_atr": np.array(instrument_atr)
         }
         return backtester_results
 
     def save_results(self, results: BacktesterResults, output_file: str = "backtest_results.csv") -> None:
         """
-        Save backtest results to a CSV file with summary metrics, daily P&L, and trade history.
+        Save backtest results to a CSV file with summary metrics, daily P&L, trade history,
+        instrument P&L, and drawdowns.
         """
         # Summary metrics
         win_rate_pct: float = np.sum(results["daily_pnl"] > 0) / len(results["daily_pnl"]) * 100
@@ -432,6 +510,7 @@ class Backtester:
         ann_sharpe: float = np.sqrt(250) * mean_pnl / std_dev_pnl if std_dev_pnl != 0 else 0
         score: float = mean_pnl - 0.1 * std_dev_pnl
         avg_capital_util: float = results["daily_capital_utilisation"].mean() * 100
+        max_drawdown: float = np.min(results["drawdowns"]) if len(results["drawdowns"]) > 0 else 0.0
         summary_data = {
             "start_day": [results["start_day"]],
             "end_day": [results["end_day"]],
@@ -441,7 +520,8 @@ class Backtester:
             "score": [score],
             "win_rate_pct": [win_rate_pct],
             "total_volume": [results["total_volume"]],
-            "avg_capital_utilization_pct": [avg_capital_util]
+            "avg_capital_utilization_pct": [avg_capital_util],
+            "max_drawdown": [max_drawdown]
         }
         summary_df = pd.DataFrame(summary_data)
 
@@ -449,10 +529,11 @@ class Backtester:
         days = np.arange(results["start_day"], results["end_day"] + 1)
         daily_pnl_df = pd.DataFrame({
             "day": days,
-            "pnl": results["daily_pnl"]
+            "pnl": results["daily_pnl"],
+            "drawdown": results["drawdowns"]
         })
 
-        # Trade history
+        # Trade history with durations
         trade_data = []
         for instrument_no in range(50):
             for trade in results["trades"][instrument_no]:
@@ -460,18 +541,38 @@ class Backtester:
                     "instrument": instrument_no,
                     "day": trade["day"],
                     "price_entry": trade["price_entry"],
-                    "order_type": trade["order_type"]
+                    "order_type": trade["order_type"],
+                    "duration": trade["duration"]
                 })
         trade_df = pd.DataFrame(trade_data)
+
+        # Instrument-level P&L
+        instrument_data = []
+        for instrument_no in range(50):
+            inst_pnl = results["instrument_pnl"][instrument_no]
+            mean_inst_pnl = np.mean(inst_pnl) if len(inst_pnl) > 0 else 0.0
+            max_loss = np.min(inst_pnl) if len(inst_pnl) > 0 else 0.0
+            trade_count = len([t for t in results["trades"][instrument_no] if t["duration"] > 0])
+            atr = results["instrument_atr"][instrument_no]
+            instrument_data.append({
+                "instrument": instrument_no,
+                "mean_pnl": mean_inst_pnl,
+                "max_loss": max_loss,
+                "trade_count": trade_count,
+                "atr": atr
+            })
+        instrument_df = pd.DataFrame(instrument_data)
 
         # Save to CSV
         with open(output_file, 'w') as f:
             f.write("Summary Metrics\n")
             summary_df.to_csv(f, index=False)
-            f.write("\nDaily P&L\n")
+            f.write("\nDaily P&L and Drawdowns\n")
             daily_pnl_df.to_csv(f, index=False)
             f.write("\nTrade History\n")
             trade_df.to_csv(f, index=False)
+            f.write("\nInstrument P&L\n")
+            instrument_df.to_csv(f, index=False)
         print(f"Backtest results saved to {output_file}")
 
     def show_dashboard(self, backtester_results: BacktesterResults, graphs: List[str]) -> None:
@@ -563,7 +664,7 @@ def main() -> None:
     params: Params = parse_command_line_args()
     backtester: Backtester = Backtester(params)
     backtester_results: BacktesterResults = backtester.run(params.start_day, params.end_day)
-    backtester.save_results(backtester_results)  # Save results to CSV
+    backtester.save_results(backtester_results)
     backtester.show_dashboard(backtester_results, params.graphs)
     backtester.show_price_entries(backtester_results)
 
